@@ -19,6 +19,7 @@ import sys
 import datetime as dt
 import time
 import glob
+import gc
 import numpy as np
 import xarray as xr
 import rasterio
@@ -182,6 +183,7 @@ def process_era5l_data_multi():
         evap_index_set = {b['Index'] for b in evap_bands}
 
         try:
+            day_start_time = time.time()
             in_dir = os.path.join(BASE_INPUT_DIR, str(y), f'{m:02d}')
             tif_list = sorted(glob.glob(os.path.join(in_dir, f'ERA5_LAND_DAILY_{ds_date}*.tif')))
             if len(tif_list) != 2:
@@ -190,22 +192,39 @@ def process_era5l_data_multi():
                 continue
 
             print('  读取所需波段中 …')
-            band_cache = {}
+            read_start_time = time.time()
+            # 批量读取优化：一次性读取所有需要的波段，减少I/O调用次数
             with rasterio.open(tif_list[0]) as s1, rasterio.open(tif_list[1]) as s2:
-                for idx in needed_indices:
-                    a1 = s1.read(idx)
-                    a2 = s2.read(idx)
-                    full = np.concatenate((a1, a2), axis=1)
-                    arr = full.astype(np.float32)
-                    if idx in evap_index_set:  # 仅蒸发类做 -1000 缩放
-                        arr = arr * -1000.0
-                    band_cache[idx] = arr
+                # 批量读取所有需要的波段 - 主要性能优化点
+                s1_bands = s1.read(needed_indices)  # shape: (n_bands, height, width)
+                s2_bands = s2.read(needed_indices)  # shape: (n_bands, height, width)
+                
+                # 拼接两个半球数据
+                full_bands = np.concatenate((s1_bands, s2_bands), axis=2).astype(np.float32)
+                
+                # 向量化处理蒸发数据的缩放 - 性能优化
+                evap_positions = [i for i, idx in enumerate(needed_indices) if idx in evap_index_set]
+                if evap_positions:
+                    full_bands[evap_positions] *= -1000.0
+                
+                # 构建索引映射
+                idx_to_position = {idx: i for i, idx in enumerate(needed_indices)}
+                
+                # 函数：从全数据中提取指定波段的数据
+                def get_band_data(band_idx):
+                    return full_bands[idx_to_position[band_idx]]
+            
+            read_time = time.time() - read_start_time
+            print(f'  波段读取完成，耗时: {read_time:.2f}秒')
+            
+            process_start_time = time.time()
 
             def build_dataset(band_list):
                 data_vars = {}
                 for b in band_list:
+                    # 使用优化后的数据访问方式
                     data_vars[b['VarName']] = xr.DataArray(
-                        band_cache[b['Index']], dims=['lat','lon'], name=b['VarName'],
+                        get_band_data(b['Index']), dims=['lat','lon'], name=b['VarName'],
                         attrs={'long_name': b['LongName'], 'units': b['Units']}
                     )
                 ds = xr.Dataset(data_vars,
@@ -230,12 +249,17 @@ def process_era5l_data_multi():
             if need_evap:
                 ds_evap = finalize(build_dataset(evap_bands))
                 if APPLY_EVAP_SWAP:
-                    Es, Ew, Et = ds_evap['Es'].copy(deep=True), ds_evap['Ew'].copy(deep=True), ds_evap['Et'].copy(deep=True)
-                    ds_evap['Es'].values = Ew.values
-                    ds_evap['Ew'].values = Et.values
-                    ds_evap['Et'].values = Es.values
+                    # 优化：使用numpy操作进行交换，避免深拷贝
+                    es_data = ds_evap['Es'].values.copy()
+                    ew_data = ds_evap['Ew'].values.copy()
+                    et_data = ds_evap['Et'].values.copy()
+                    ds_evap['Es'].values = ew_data
+                    ds_evap['Ew'].values = et_data
+                    ds_evap['Et'].values = es_data
+                    del es_data, ew_data, et_data  # 释放临时数组
                 save_nc(ds_evap, out_evap_nc)
                 print('  写出 Evap 完成。')
+                del ds_evap; gc.collect()  # 及时释放内存
             else:
                 print('  Evap 已存在，跳过写出。')
 
@@ -243,6 +267,7 @@ def process_era5l_data_multi():
                 ds_veg = finalize(build_dataset(veg_bands))
                 save_nc(ds_veg, out_veg_nc)
                 print('  写出 Vegetation 完成。')
+                del ds_veg; gc.collect()  # 及时释放内存
             else:
                 print('  Vegetation 已存在，跳过写出。')
 
@@ -250,6 +275,7 @@ def process_era5l_data_multi():
                 ds_rad = finalize(build_dataset(rad_bands))
                 save_nc(ds_rad, out_rad_nc)
                 print('  写出 Radiation 完成。')
+                del ds_rad; gc.collect()  # 及时释放内存
             else:
                 print('  Radiation 已存在，跳过写出。')
 
@@ -257,6 +283,7 @@ def process_era5l_data_multi():
                 ds_soil = finalize(build_dataset(soil_bands))
                 save_nc(ds_soil, out_soil_nc)
                 print('  写出 Soil 完成。')
+                del ds_soil; gc.collect()  # 及时释放内存
             else:
                 print('  Soil 已存在，跳过写出。')
 
@@ -264,9 +291,18 @@ def process_era5l_data_multi():
                 ds_ropr = finalize(build_dataset(ropr_bands))
                 save_nc(ds_ropr, out_ropr_nc)
                 print('  写出 Runoff+Precip 完成。')
+                del ds_ropr; gc.collect()  # 及时释放内存
             else:
                 print('  Runoff+Precip 已存在，跳过写出。')
 
+            # 释放主要数据结构
+            del full_bands
+            gc.collect()
+            
+            process_time = time.time() - process_start_time
+            day_total_time = time.time() - day_start_time
+            print(f'  处理耗时: {process_time:.2f}秒, 本日总耗时: {day_total_time:.2f}秒')
+            
             ok += 1
             print('  本日完成。')
 

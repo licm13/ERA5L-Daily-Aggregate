@@ -79,6 +79,138 @@ def process_era5l_data_multi():
     if end_dt < start_dt:
         print('结束日期早于开始日期。', file=sys.stderr); sys.exit(1)
 
+    # ========= 交互式类别选择 =========
+    print('\n正在启动数据类别选择窗口...')
+
+    # 存储用户选择的变量
+    user_selections = {}
+
+    def show_category_selection():
+        """显示类别选择窗口，返回用户的选择"""
+        selection_window = tk.Tk()
+        selection_window.title('选择要处理的数据类别')
+        selection_window.geometry('400x300')
+
+        # 创建标题标签
+        title_label = tk.Label(
+            selection_window,
+            text='请选择要处理的数据类别：',
+            font=('Arial', 12, 'bold'),
+            pady=10
+        )
+        title_label.pack()
+
+        # 创建复选框变量（使用 IntVar，1表示选中，0表示未选中）
+        var_evap = tk.IntVar(value=1)  # 默认全选
+        var_veg = tk.IntVar(value=1)
+        var_rad = tk.IntVar(value=1)
+        var_soil = tk.IntVar(value=1)
+        var_ropr = tk.IntVar(value=1)
+
+        # 创建复选框容器
+        checkbox_frame = tk.Frame(selection_window)
+        checkbox_frame.pack(pady=20)
+
+        # 创建五个复选框
+        cb_evap = tk.Checkbutton(
+            checkbox_frame,
+            text='Evaporation (蒸发)',
+            variable=var_evap,
+            font=('Arial', 10)
+        )
+        cb_evap.pack(anchor='w', pady=5)
+
+        cb_veg = tk.Checkbutton(
+            checkbox_frame,
+            text='Vegetation (植被)',
+            variable=var_veg,
+            font=('Arial', 10)
+        )
+        cb_veg.pack(anchor='w', pady=5)
+
+        cb_rad = tk.Checkbutton(
+            checkbox_frame,
+            text='Radiation (辐射)',
+            variable=var_rad,
+            font=('Arial', 10)
+        )
+        cb_rad.pack(anchor='w', pady=5)
+
+        cb_soil = tk.Checkbutton(
+            checkbox_frame,
+            text='Soil (土壤)',
+            variable=var_soil,
+            font=('Arial', 10)
+        )
+        cb_soil.pack(anchor='w', pady=5)
+
+        cb_ropr = tk.Checkbutton(
+            checkbox_frame,
+            text='Runoff + Precipitation (径流+降水)',
+            variable=var_ropr,
+            font=('Arial', 10)
+        )
+        cb_ropr.pack(anchor='w', pady=5)
+
+        # 确认按钮的回调函数
+        def on_confirm():
+            user_selections['evap'] = bool(var_evap.get())
+            user_selections['veg'] = bool(var_veg.get())
+            user_selections['rad'] = bool(var_rad.get())
+            user_selections['soil'] = bool(var_soil.get())
+            user_selections['ropr'] = bool(var_ropr.get())
+            selection_window.destroy()
+
+        # 创建确认按钮
+        confirm_button = tk.Button(
+            selection_window,
+            text='确认选择',
+            command=on_confirm,
+            font=('Arial', 11, 'bold'),
+            bg='#4CAF50',
+            fg='white',
+            padx=20,
+            pady=10
+        )
+        confirm_button.pack(pady=20)
+
+        # 居中显示窗口
+        selection_window.update_idletasks()
+        width = selection_window.winfo_width()
+        height = selection_window.winfo_height()
+        x = (selection_window.winfo_screenwidth() // 2) - (width // 2)
+        y = (selection_window.winfo_screenheight() // 2) - (height // 2)
+        selection_window.geometry(f'{width}x{height}+{x}+{y}')
+
+        # 运行窗口
+        selection_window.mainloop()
+
+        return user_selections
+
+    # 显示选择窗口并获取用户选择
+    user_choices = show_category_selection()
+
+    # 提取用户选择
+    user_wants_evap = user_choices.get('evap', False)
+    user_wants_veg = user_choices.get('veg', False)
+    user_wants_rad = user_choices.get('rad', False)
+    user_wants_soil = user_choices.get('soil', False)
+    user_wants_ropr = user_choices.get('ropr', False)
+
+    # 检查是否至少选择了一个类别
+    if not any([user_wants_evap, user_wants_veg, user_wants_rad, user_wants_soil, user_wants_ropr]):
+        print('\n未选择任何类别，程序退出。', file=sys.stderr)
+        sys.exit(0)
+
+    # 显示用户选择的类别
+    selected_categories = []
+    if user_wants_evap: selected_categories.append('Evaporation')
+    if user_wants_veg: selected_categories.append('Vegetation')
+    if user_wants_rad: selected_categories.append('Radiation')
+    if user_wants_soil: selected_categories.append('Soil')
+    if user_wants_ropr: selected_categories.append('Runoff+Precip')
+    print(f'\n已选择的类别: {", ".join(selected_categories)}')
+
     # ========= 变量表 =========
     evap_bands = [
         {'Index': 35, 'VarName': 'Es', 'LongName': 'Evaporation from bare soil', 'Units': 'mm day-1'},
@@ -191,12 +323,12 @@ def process_era5l_data_multi():
         out_soil_nc = os.path.join(OUT_SOIL, str(y), f'{m:02d}', f'ERA5_Land_Daily_Soil_{ds_date}.nc')
         out_ropr_nc = os.path.join(OUT_ROPR, str(y), f'{m:02d}', f'ERA5_Land_Daily_RunoffPrecip_{ds_date}.nc')
 
-        # —— 按需判断每个类别是否需要写出 ——
-        need_evap = not os.path.isfile(out_evap_nc)
-        need_veg  = not os.path.isfile(out_veg_nc)
-        need_rad  = not os.path.isfile(out_rad_nc)
-        need_soil = not os.path.isfile(out_soil_nc)
-        need_ropr = not os.path.isfile(out_ropr_nc)
+        # —— 按需判断每个类别是否需要写出 (结合用户选择与文件存在性) ——
+        need_evap = user_wants_evap and (not os.path.isfile(out_evap_nc))
+        need_veg  = user_wants_veg  and (not os.path.isfile(out_veg_nc))
+        need_rad  = user_wants_rad  and (not os.path.isfile(out_rad_nc))
+        need_soil = user_wants_soil and (not os.path.isfile(out_soil_nc))
+        need_ropr = user_wants_ropr and (not os.path.isfile(out_ropr_nc))
 
         if not any([need_evap, need_veg, need_rad, need_soil, need_ropr]):
             print('  当日所有类别产物均已存在，跳过写出。')

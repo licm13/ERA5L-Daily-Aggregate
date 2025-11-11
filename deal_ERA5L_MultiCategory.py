@@ -24,6 +24,9 @@ import numpy as np
 import xarray as xr
 import rasterio
 import traceback
+import tkinter as tk
+from tkinter import filedialog
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ===== 可配置项 =====
 APPLY_EVAP_SWAP = True  # 历史数据已修正；如需在新数据上继续应用交换修正，改为 True
@@ -35,6 +38,34 @@ OUT_SOIL = r'G:\\SoilMoisture'
 OUT_ROPR = r'G:\\Precipitation_Runoff'
 
 def process_era5l_data_multi():
+    # ========= GUI 路径选择 =========
+    print('正在启动路径选择对话框...')
+    root = tk.Tk()
+    root.withdraw()  # 隐藏主窗口
+
+    # 选择基础输入目录
+    BASE_INPUT_DIR = filedialog.askdirectory(title='请选择基础输入目录 (例如: D:)')
+    if not BASE_INPUT_DIR:
+        print('未选择输入目录，程序退出。', file=sys.stderr)
+        sys.exit(1)
+    print(f'已选择输入目录: {BASE_INPUT_DIR}')
+
+    # 选择基础输出目录
+    BASE_OUTPUT_DIR = filedialog.askdirectory(title='请选择基础输出目录')
+    if not BASE_OUTPUT_DIR:
+        print('未选择输出目录，程序退出。', file=sys.stderr)
+        sys.exit(1)
+    print(f'已选择输出目录: {BASE_OUTPUT_DIR}')
+
+    # 构建各个输出子目录路径
+    OUT_EVAP = os.path.join(BASE_OUTPUT_DIR, 'Evaporation_Flux', 'ERA5L')
+    OUT_VEG  = os.path.join(BASE_OUTPUT_DIR, 'Vegetation')
+    OUT_RAD  = os.path.join(BASE_OUTPUT_DIR, 'Radiation')
+    OUT_SOIL = os.path.join(BASE_OUTPUT_DIR, 'SoilMoisture')
+    OUT_ROPR = os.path.join(BASE_OUTPUT_DIR, 'Precipitation_Runoff')
+
+    root.destroy()  # 销毁tkinter窗口
+
     # ========= 交互式日期 =========
     def ask_date(prompt):
         while True:
@@ -191,31 +222,52 @@ def process_era5l_data_multi():
                 fail += 1
                 continue
 
-            print('  读取所需波段中 …')
+            print('  读取所需波段中 (使用并行I/O) …')
             read_start_time = time.time()
-            # 批量读取优化：一次性读取所有需要的波段，减少I/O调用次数
-            with rasterio.open(tif_list[0]) as s1, rasterio.open(tif_list[1]) as s2:
-                # 批量读取所有需要的波段 - 主要性能优化点
-                s1_bands = s1.read(needed_indices)  # shape: (n_bands, height, width)
-                s2_bands = s2.read(needed_indices)  # shape: (n_bands, height, width)
-                
-                # 拼接两个半球数据
-                full_bands = np.concatenate((s1_bands, s2_bands), axis=2).astype(np.float32)
-                
-                # 向量化处理蒸发数据的缩放 - 性能优化
-                evap_positions = [i for i, idx in enumerate(needed_indices) if idx in evap_index_set]
-                if evap_positions:
-                    full_bands[evap_positions] *= -1000.0
-                
-                # 构建索引映射
-                idx_to_position = {idx: i for i, idx in enumerate(needed_indices)}
-                
-                # 函数：从全数据中提取指定波段的数据
-                def get_band_data(band_idx):
-                    return full_bands[idx_to_position[band_idx]]
-            
+
+            # 定义辅助函数：读取单个TIF文件的指定波段
+            def read_tif_bands(tif_path, band_indices):
+                """
+                读取指定TIF文件的所需波段
+
+                Args:
+                    tif_path: TIF文件路径
+                    band_indices: 需要读取的波段索引列表
+
+                Returns:
+                    读取到的波段数据 (n_bands, height, width)
+                """
+                with rasterio.open(tif_path) as src:
+                    bands = src.read(band_indices)
+                return bands
+
+            # 使用 ThreadPoolExecutor 并行读取两个TIF文件
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                # 并行提交两个读取任务
+                future_s1 = executor.submit(read_tif_bands, tif_list[0], needed_indices)
+                future_s2 = executor.submit(read_tif_bands, tif_list[1], needed_indices)
+
+                # 获取两个future的结果
+                s1_bands = future_s1.result()  # shape: (n_bands, height, width)
+                s2_bands = future_s2.result()  # shape: (n_bands, height, width)
+
+            # 拼接两个半球数据
+            full_bands = np.concatenate((s1_bands, s2_bands), axis=2).astype(np.float32)
+
+            # 向量化处理蒸发数据的缩放 - 性能优化
+            evap_positions = [i for i, idx in enumerate(needed_indices) if idx in evap_index_set]
+            if evap_positions:
+                full_bands[evap_positions] *= -1000.0
+
+            # 构建索引映射
+            idx_to_position = {idx: i for i, idx in enumerate(needed_indices)}
+
+            # 函数：从全数据中提取指定波段的数据
+            def get_band_data(band_idx):
+                return full_bands[idx_to_position[band_idx]]
+
             read_time = time.time() - read_start_time
-            print(f'  波段读取完成，耗时: {read_time:.2f}秒')
+            print(f'  波段读取完成 (并行I/O)，耗时: {read_time:.2f}秒')
             
             process_start_time = time.time()
 

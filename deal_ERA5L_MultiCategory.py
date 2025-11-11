@@ -2,16 +2,24 @@
 # -*- coding: utf-8 -*-
 
 """
-ERA5-Land GeoTIFF -> NetCDF (Multi-Category) - v4.1 (bugfix)
-------------------------------------------------------------
-修复：当 Evap 与 Runoff+Precip 已存在时，之前版本直接 continue 跳过了当天**所有**类别的处理。
-本版本改为**仅跳过相应类别的写出**，其他类别（Vegetation/Radiation/Soil）仍会正常处理。
-同时仅为“需要”的类别读取/构建波段以节约内存与时间。
+ERA5-Land GeoTIFF -> NetCDF (Multi-Category) - v5.0 (交互式类别选择)
+--------------------------------------------------------------------
+新增功能 (v5.0)：
+- 添加交互式类别选择界面：在处理数据前，用户可通过 tkinter 复选框界面选择要处理的数据类别
+- 支持选择性处理五大类别：蒸发(Evaporation)、植被(Vegetation)、辐射(Radiation)、土壤(Soil)、径流+降水(Runoff+Precip)
+- 仅处理用户选择且文件不存在的类别，避免不必要的计算和I/O操作
+- 未选择任何类别时友好提示并退出
+
+历史版本特性 (v4.1)：
+- 修复：当 Evap 与 Runoff+Precip 已存在时，之前版本直接 continue 跳过了当天**所有**类别的处理。
+- 改为**仅跳过相应类别的写出**，其他类别（Vegetation/Radiation/Soil）仍会正常处理。
+- 仅为"需要"的类别读取/构建波段以节约内存与时间。
 
 其他调整：
-- APPLY_EVAP_SWAP 默认 False（与用户历史数据一致，可自行改为 True）。
+- APPLY_EVAP_SWAP 默认 True（可自行改为 False）。
 - 按 yyyy/mm 子目录存储保持不变。
 - 仅蒸发变量保留 *-1000 缩放，其余变量不缩放。
+- 使用并行I/O优化读取性能。
 """
 
 import os
@@ -78,6 +86,89 @@ def process_era5l_data_multi():
     end_dt   = ask_date('请输入结束日期 (yyyymmdd): ')
     if end_dt < start_dt:
         print('结束日期早于开始日期。', file=sys.stderr); sys.exit(1)
+
+    # ========= 交互式类别选择 =========
+    print('正在启动类别选择对话框...')
+
+    # 创建一个新的tkinter窗口用于类别选择
+    category_window = tk.Tk()
+    category_window.title('请选择要处理的数据类别')
+    category_window.geometry('400x300')
+
+    # 创建复选框变量
+    var_evap = tk.BooleanVar(value=True)  # 默认全选
+    var_veg = tk.BooleanVar(value=True)
+    var_rad = tk.BooleanVar(value=True)
+    var_soil = tk.BooleanVar(value=True)
+    var_ropr = tk.BooleanVar(value=True)
+
+    # 添加标题标签
+    title_label = tk.Label(category_window, text='请选择要处理的数据类别：',
+                          font=('Arial', 12, 'bold'), pady=10)
+    title_label.pack()
+
+    # 创建复选框框架
+    checkbox_frame = tk.Frame(category_window)
+    checkbox_frame.pack(pady=10)
+
+    # 创建复选框
+    cb_evap = tk.Checkbutton(checkbox_frame, text='☐ Evaporation (蒸发)',
+                            variable=var_evap, font=('Arial', 11))
+    cb_evap.pack(anchor='w', pady=5, padx=20)
+
+    cb_veg = tk.Checkbutton(checkbox_frame, text='☐ Vegetation (植被)',
+                           variable=var_veg, font=('Arial', 11))
+    cb_veg.pack(anchor='w', pady=5, padx=20)
+
+    cb_rad = tk.Checkbutton(checkbox_frame, text='☐ Radiation (辐射)',
+                           variable=var_rad, font=('Arial', 11))
+    cb_rad.pack(anchor='w', pady=5, padx=20)
+
+    cb_soil = tk.Checkbutton(checkbox_frame, text='☐ Soil (土壤)',
+                            variable=var_soil, font=('Arial', 11))
+    cb_soil.pack(anchor='w', pady=5, padx=20)
+
+    cb_ropr = tk.Checkbutton(checkbox_frame, text='☐ Runoff+Precip (径流+降水)',
+                            variable=var_ropr, font=('Arial', 11))
+    cb_ropr.pack(anchor='w', pady=5, padx=20)
+
+    # 创建确认按钮
+    def confirm_selection():
+        category_window.quit()
+
+    confirm_button = tk.Button(category_window, text='确认选择',
+                              command=confirm_selection,
+                              font=('Arial', 11, 'bold'),
+                              bg='#4CAF50', fg='white',
+                              padx=20, pady=10)
+    confirm_button.pack(pady=20)
+
+    # 显示窗口并等待用户操作
+    category_window.mainloop()
+
+    # 获取用户选择
+    user_wants_evap = var_evap.get()
+    user_wants_veg = var_veg.get()
+    user_wants_rad = var_rad.get()
+    user_wants_soil = var_soil.get()
+    user_wants_ropr = var_ropr.get()
+
+    # 销毁类别选择窗口
+    category_window.destroy()
+
+    # 检查是否至少选择了一个类别
+    if not any([user_wants_evap, user_wants_veg, user_wants_rad, user_wants_soil, user_wants_ropr]):
+        print('未选择任何类别，程序退出。', file=sys.stderr)
+        sys.exit(1)
+
+    # 显示用户的选择
+    print('\n已选择的数据类别：')
+    if user_wants_evap: print('  ✓ Evaporation (蒸发)')
+    if user_wants_veg:  print('  ✓ Vegetation (植被)')
+    if user_wants_rad:  print('  ✓ Radiation (辐射)')
+    if user_wants_soil: print('  ✓ Soil (土壤)')
+    if user_wants_ropr: print('  ✓ Runoff+Precip (径流+降水)')
+    print()
 
     # ========= 变量表 =========
     evap_bands = [
@@ -191,15 +282,15 @@ def process_era5l_data_multi():
         out_soil_nc = os.path.join(OUT_SOIL, str(y), f'{m:02d}', f'ERA5_Land_Daily_Soil_{ds_date}.nc')
         out_ropr_nc = os.path.join(OUT_ROPR, str(y), f'{m:02d}', f'ERA5_Land_Daily_RunoffPrecip_{ds_date}.nc')
 
-        # —— 按需判断每个类别是否需要写出 ——
-        need_evap = not os.path.isfile(out_evap_nc)
-        need_veg  = not os.path.isfile(out_veg_nc)
-        need_rad  = not os.path.isfile(out_rad_nc)
-        need_soil = not os.path.isfile(out_soil_nc)
-        need_ropr = not os.path.isfile(out_ropr_nc)
+        # —— 按需判断每个类别是否需要写出（结合用户选择和文件存在性） ——
+        need_evap = user_wants_evap and (not os.path.isfile(out_evap_nc))
+        need_veg  = user_wants_veg  and (not os.path.isfile(out_veg_nc))
+        need_rad  = user_wants_rad  and (not os.path.isfile(out_rad_nc))
+        need_soil = user_wants_soil and (not os.path.isfile(out_soil_nc))
+        need_ropr = user_wants_ropr and (not os.path.isfile(out_ropr_nc))
 
         if not any([need_evap, need_veg, need_rad, need_soil, need_ropr]):
-            print('  当日所有类别产物均已存在，跳过写出。')
+            print('  当日所有已选类别的产物均已存在（或未选择任何类别），跳过写出。')
             skip += 1
             continue
 

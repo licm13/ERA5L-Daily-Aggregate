@@ -251,6 +251,96 @@ def process_era5l_data_multi():
         {'Index': 146, 'VarName': 'tp_max',     'LongName': 'Daily maximum total precipitation', 'Units': 'm'},
     ]
 
+    # ========= 变量粒度选择（新增） =========
+    # 为每个已选类别提供具体变量的复选框，默认全选，可自定义取消
+    print('正在启动变量选择对话框 (可细化到具体变量)…')
+    var_window = tk.Tk()
+    var_window.title('请选择要输出的具体变量 (Variables)')
+    var_window.geometry('860x650')
+
+    # 为了便于滚动，构建一个带Canvas的滚动区域（变量较多时避免窗口超出）
+    canvas = tk.Canvas(var_window)
+    scrollbar = tk.Scrollbar(var_window, orient='vertical', command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas)
+    scrollable_frame.bind(
+        '<Configure>',
+        lambda e: canvas.configure(scrollregion=canvas.bbox('all'))
+    )
+    canvas.create_window((0,0), window=scrollable_frame, anchor='nw')
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.pack(side='left', fill='both', expand=True)
+    scrollbar.pack(side='right', fill='y')
+
+    header_label = tk.Label(scrollable_frame, text='步骤2：在已选类别中细选要输出的具体变量 (默认全选)',
+                            font=('Arial', 13, 'bold'), pady=10)
+    header_label.pack()
+
+    # 保存每个类别的变量复选框变量
+    evap_var_list = []
+    veg_var_list  = []
+    rad_var_list  = []
+    soil_var_list = []
+    ropr_var_list = []
+
+    def build_category_block(title_cn, bands, bool_list_container):
+        frame = tk.LabelFrame(scrollable_frame, text=title_cn, font=('Arial', 12, 'bold'), padx=8, pady=6)
+        frame.pack(fill='x', padx=10, pady=6)
+        # 按行排放变量
+        for b in bands:
+            var = tk.BooleanVar(value=True)
+            chk = tk.Checkbutton(frame, text=f"{b['VarName']}  -  {b['LongName']}", variable=var, anchor='w')
+            chk.pack(fill='x', padx=6, pady=2)
+            bool_list_container.append((var, b))
+        # 全选/全不选按钮
+        btn_frame = tk.Frame(frame)
+        btn_frame.pack(fill='x', pady=4)
+        def select_all():
+            for v,_b in bool_list_container: v.set(True)
+        def unselect_all():
+            for v,_b in bool_list_container: v.set(False)
+        tk.Button(btn_frame, text='全选', command=select_all, width=8).pack(side='left', padx=4)
+        tk.Button(btn_frame, text='全不选', command=unselect_all, width=8).pack(side='left', padx=4)
+
+    if user_wants_evap: build_category_block('Evaporation (蒸发)', evap_bands, evap_var_list)
+    if user_wants_veg:  build_category_block('Vegetation (植被)',   veg_bands,  veg_var_list)
+    if user_wants_rad:  build_category_block('Radiation (辐射)',    rad_bands,  rad_var_list)
+    if user_wants_soil: build_category_block('Soil (土壤)',         soil_bands, soil_var_list)
+    if user_wants_ropr: build_category_block('Runoff+Precip (径流+降水)', ropr_bands, ropr_var_list)
+
+    # 确认按钮：收集选择结果
+    def confirm_variables():
+        var_window.quit()
+    tk.Button(scrollable_frame, text='确认变量选择', command=confirm_variables,
+              font=('Arial', 12, 'bold'), bg='#2196F3', fg='white', padx=20, pady=8).pack(pady=12)
+    var_window.mainloop()
+    var_window.destroy()
+
+    # 根据复选框结果筛选变量列表（仅保留选中 True 的）
+    selected_evap_bands = [b for v,b in evap_var_list if v.get()] if user_wants_evap else []
+    selected_veg_bands  = [b for v,b in veg_var_list  if v.get()] if user_wants_veg  else []
+    selected_rad_bands  = [b for v,b in rad_var_list  if v.get()] if user_wants_rad  else []
+    selected_soil_bands = [b for v,b in soil_var_list if v.get()] if user_wants_soil else []
+    selected_ropr_bands = [b for v,b in ropr_var_list if v.get()] if user_wants_ropr else []
+
+    # 如果用户在已选类别中一个变量都没选，直接退出
+    total_selected_count = sum(len(x) for x in [selected_evap_bands, selected_veg_bands, selected_rad_bands, selected_soil_bands, selected_ropr_bands])
+    if total_selected_count == 0:
+        print('未选择任何具体变量，程序退出。', file=sys.stderr)
+        sys.exit(1)
+
+    print('\n具体变量选择汇总：')
+    if user_wants_evap:
+        print(f"  Evaporation: 已选 {len(selected_evap_bands)}/{len(evap_bands)} 个变量")
+    if user_wants_veg:
+        print(f"  Vegetation:  已选 {len(selected_veg_bands)}/{len(veg_bands)} 个变量")
+    if user_wants_rad:
+        print(f"  Radiation:   已选 {len(selected_rad_bands)}/{len(rad_bands)} 个变量")
+    if user_wants_soil:
+        print(f"  Soil:        已选 {len(selected_soil_bands)}/{len(soil_bands)} 个变量")
+    if user_wants_ropr:
+        print(f"  Runoff+Precip: 已选 {len(selected_ropr_bands)}/{len(ropr_bands)} 个变量")
+    print()
+
     global_attrs = {
         'title': 'ERA5-Land daily data from 1950 to present',
         'long_title': 'hourly-daily sum/24',
@@ -283,11 +373,11 @@ def process_era5l_data_multi():
         out_ropr_nc = os.path.join(OUT_ROPR, str(y), f'{m:02d}', f'ERA5_Land_Daily_RunoffPrecip_{ds_date}.nc')
 
         # —— 按需判断每个类别是否需要写出（结合用户选择和文件存在性） ——
-        need_evap = user_wants_evap and (not os.path.isfile(out_evap_nc))
-        need_veg  = user_wants_veg  and (not os.path.isfile(out_veg_nc))
-        need_rad  = user_wants_rad  and (not os.path.isfile(out_rad_nc))
-        need_soil = user_wants_soil and (not os.path.isfile(out_soil_nc))
-        need_ropr = user_wants_ropr and (not os.path.isfile(out_ropr_nc))
+        need_evap = user_wants_evap and selected_evap_bands and (not os.path.isfile(out_evap_nc))
+        need_veg  = user_wants_veg  and selected_veg_bands  and (not os.path.isfile(out_veg_nc))
+        need_rad  = user_wants_rad  and selected_rad_bands  and (not os.path.isfile(out_rad_nc))
+        need_soil = user_wants_soil and selected_soil_bands and (not os.path.isfile(out_soil_nc))
+        need_ropr = user_wants_ropr and selected_ropr_bands and (not os.path.isfile(out_ropr_nc))
 
         if not any([need_evap, need_veg, need_rad, need_soil, need_ropr]):
             print('  当日所有已选类别的产物均已存在（或未选择任何类别），跳过写出。')
@@ -296,13 +386,13 @@ def process_era5l_data_multi():
 
         # 依据“需要”的类别汇总所需波段索引，避免不必要读取
         bands_by_cat = []
-        if need_evap: bands_by_cat += evap_bands
-        if need_veg:  bands_by_cat += veg_bands
-        if need_rad:  bands_by_cat += rad_bands
-        if need_soil: bands_by_cat += soil_bands
-        if need_ropr: bands_by_cat += ropr_bands
+        if need_evap: bands_by_cat += selected_evap_bands
+        if need_veg:  bands_by_cat += selected_veg_bands
+        if need_rad:  bands_by_cat += selected_rad_bands
+        if need_soil: bands_by_cat += selected_soil_bands
+        if need_ropr: bands_by_cat += selected_ropr_bands
         needed_indices = sorted(set([b['Index'] for b in bands_by_cat]))
-        evap_index_set = {b['Index'] for b in evap_bands}
+        evap_index_set = {b['Index'] for b in selected_evap_bands}
 
         try:
             day_start_time = time.time()
@@ -390,7 +480,7 @@ def process_era5l_data_multi():
                 ds.to_netcdf(path, encoding=enc)
 
             if need_evap:
-                ds_evap = finalize(build_dataset(evap_bands))
+                ds_evap = finalize(build_dataset(selected_evap_bands))
                 if APPLY_EVAP_SWAP:
                     # 优化：使用numpy操作进行交换，避免深拷贝
                     es_data = ds_evap['Es'].values.copy()
@@ -407,7 +497,7 @@ def process_era5l_data_multi():
                 print('  Evap 已存在，跳过写出。')
 
             if need_veg:
-                ds_veg = finalize(build_dataset(veg_bands))
+                ds_veg = finalize(build_dataset(selected_veg_bands))
                 save_nc(ds_veg, out_veg_nc)
                 print('  写出 Vegetation 完成。')
                 del ds_veg; gc.collect()  # 及时释放内存
@@ -415,7 +505,7 @@ def process_era5l_data_multi():
                 print('  Vegetation 已存在，跳过写出。')
 
             if need_rad:
-                ds_rad = finalize(build_dataset(rad_bands))
+                ds_rad = finalize(build_dataset(selected_rad_bands))
                 save_nc(ds_rad, out_rad_nc)
                 print('  写出 Radiation 完成。')
                 del ds_rad; gc.collect()  # 及时释放内存
@@ -423,7 +513,7 @@ def process_era5l_data_multi():
                 print('  Radiation 已存在，跳过写出。')
 
             if need_soil:
-                ds_soil = finalize(build_dataset(soil_bands))
+                ds_soil = finalize(build_dataset(selected_soil_bands))
                 save_nc(ds_soil, out_soil_nc)
                 print('  写出 Soil 完成。')
                 del ds_soil; gc.collect()  # 及时释放内存
@@ -431,7 +521,7 @@ def process_era5l_data_multi():
                 print('  Soil 已存在，跳过写出。')
 
             if need_ropr:
-                ds_ropr = finalize(build_dataset(ropr_bands))
+                ds_ropr = finalize(build_dataset(selected_ropr_bands))
                 save_nc(ds_ropr, out_ropr_nc)
                 print('  写出 Runoff+Precip 完成。')
                 del ds_ropr; gc.collect()  # 及时释放内存
